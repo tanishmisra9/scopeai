@@ -1,0 +1,11 @@
+streamlit>=1.30
+numpy
+scipy
+scikit-learn
+joblib
+matplotlib
+plotly
+openai
+
+# External system dependency (not pip):
+# Digilent WaveForms SDK / libdwf (installed with WaveForms app)
