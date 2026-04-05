@@ -210,7 +210,7 @@ def _render_waveform() -> None:
         template="plotly_dark",
         showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_metrics() -> None:
@@ -254,36 +254,38 @@ def _render_diagnosis() -> None:
 def _render_chat_panel() -> None:
     """Render right-side chat UI and handle chat submissions."""
     st.subheader("AI Chat")
-    if not st.session_state.conversation_history:
-        st.caption("Try: What's wrong with my circuit?")
-        st.caption("Try: Can you capture another reading?")
-        st.caption("Try: Explain what jitter means")
-        st.caption("Try: Try running at 3.3V")
-
-    for msg in st.session_state.conversation_history:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
     user_input = st.chat_input("Ask ScopeAI about your circuit...")
     if user_input:
-        with st.chat_message("user"):
-            st.write(user_input)
         with st.spinner("ScopeAI is thinking..."):
-            response, updated_history = diagnose.chat(
+            _, updated_history = diagnose.chat(
                 user_message=user_input,
                 conversation_history=st.session_state.conversation_history,
                 current_metrics=st.session_state.last_features,
                 current_diagnosis=st.session_state.last_prediction,
             )
             st.session_state.conversation_history = updated_history
-        with st.chat_message("assistant"):
-            st.write(response)
+        st.rerun()
+
+    for msg in st.session_state.conversation_history:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    if not st.session_state.conversation_history:
+        st.caption(
+            'Try: "What\'s wrong with my circuit?" or "Capture another reading" '
+            'or "Explain jitter" or "Try 3.3V"'
+        )
 
 
 def main() -> None:
     """Run Streamlit dashboard app."""
     _init_session_state()
     st.title("ScopeAI")
+    if st.session_state.simulation_mode:
+        st.warning(
+            "No Analog Discovery 2 detected — running in simulation mode. "
+            "Connect AD2 via USB and restart."
+        )
 
     if st.session_state.model_error:
         st.warning(st.session_state.model_error)
@@ -323,6 +325,11 @@ def main() -> None:
     # Trigger manual capture before rendering panels.
     if capture_now or st.session_state.last_features is None:
         _run_sample_cycle(circuit_mode=circuit_mode)
+        if capture_now:
+            if hasattr(st, "toast"):
+                st.toast("Signal captured")
+            else:
+                st.sidebar.success("Signal captured")
 
     left_col, right_col = st.columns([3, 2])
 
