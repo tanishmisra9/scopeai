@@ -222,19 +222,41 @@ class _ScopeCaptureBackend:
         noise_std = 0.03
 
         if self.simulated_fault == "nominal":
-            freq = 28.0
-            duty = 0.52
+            # Mode A nominal target: freq~2.5 Hz, amplitude_rel~0.40, very low ZCR.
+            freq = 2.3707
+            duty = 0.5140
             wave = np.where(np.mod(t * freq, 1.0) < duty, 1.0, -1.0)
+            wave = self._smooth_noise(n_samples=n_samples, kernel_size=71) * 0.0 + np.convolve(
+                wave, np.ones(71, dtype=np.float64) / 71.0, mode="same"
+            )
+            volts = 0.5588 + 0.3878 * wave + np.random.normal(0.0, 0.00224, size=n_samples)
+            volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
+            return volts.astype(np.float64, copy=False)
         elif self.simulated_fault == "R_too_high":
-            freq = 2.5
-            duty = 0.62
-            wave = np.where(np.mod(t * freq, 1.0) < duty, 1.0, -1.0)
-            noise_std = 0.02
+            # Mode A R_too_high target: freq~0.5 Hz, high jitter, similar amplitude.
+            inst_freq = 1.0022 + 0.0604 * np.sin(2.0 * np.pi * 1.5523 * t)
+            phase = np.cumsum(inst_freq) / float(self.sample_rate)
+            duty_mod = 0.5785
+            wave = np.where(np.mod(phase, 1.0) < duty_mod, 1.0, -1.0)
+            wave = np.convolve(wave, np.ones(193, dtype=np.float64) / 193.0, mode="same")
+            ripple = 0.05395 * np.sin(2.0 * np.pi * 488.7 * t)
+            volts = (
+                0.7949
+                + 0.5663 * wave
+                + ripple
+                + np.random.normal(0.0, 0.00024, size=n_samples)
+            )
+            volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
+            return volts.astype(np.float64, copy=False)
         elif self.simulated_fault == "R_too_low":
-            freq = 58.0
-            duty = 0.44
+            # Mode A R_too_low target: freq~4.0 Hz, lower jitter, similar amplitude.
+            freq = 3.8488
+            duty = 0.6074
             wave = np.where(np.mod(t * freq, 1.0) < duty, 1.0, -1.0)
-            noise_std = 0.025
+            wave = np.convolve(wave, np.ones(162, dtype=np.float64) / 162.0, mode="same")
+            volts = 0.4178 + 0.3812 * wave + np.random.normal(0.0, 0.00326, size=n_samples)
+            volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
+            return volts.astype(np.float64, copy=False)
         elif self.simulated_fault == "cap_missing":
             # Cap missing: weak near-DC behavior plus mains pickup and tiny fast chatter.
             # This keeps amplitude tiny while preventing broadband white-noise outliers.
@@ -247,18 +269,13 @@ class _ScopeCaptureBackend:
             volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
             return volts.astype(np.float64, copy=False)
         elif self.simulated_fault == "no_oscillation":
-            # No oscillation: pinned output with ripple/noise; keep dominant energy near 60 Hz.
-            # Add mild FM so timing metrics do not collapse to perfect periodicity.
+            # No oscillation target: DC level + 60Hz hum + light noise, modest spread.
             base_dc = 0.90
-            inst_freq = 60.0 + 10.0 * np.sin(2.0 * np.pi * 2.0 * t) + 3.0 * np.sin(
-                2.0 * np.pi * 4.1 * t
-            )
-            phase_60 = 2.0 * np.pi * np.cumsum(inst_freq) / float(self.sample_rate)
-            hum_60hz = 0.82 * np.sin(phase_60)
-            harmonic_180 = 0.12 * np.sin(2.0 * np.pi * 180.0 * t + 0.4)
-            flicker = 0.025 * self._smooth_noise(n_samples=n_samples, kernel_size=128)
-            hiss = 0.020 * np.random.normal(0.0, 1.0, size=n_samples)
-            volts = base_dc + hum_60hz + harmonic_180 + flicker + hiss
+            hum_60hz = 0.18 * np.sin(2.0 * np.pi * 60.0 * t)
+            hum_180hz = 0.01 * np.sin(2.0 * np.pi * 180.0 * t + 0.6)
+            slow_drift = 0.006 * self._smooth_noise(n_samples=n_samples, kernel_size=200)
+            hiss = 0.002 * np.random.normal(0.0, 1.0, size=n_samples)
+            volts = base_dc + hum_60hz + hum_180hz + slow_drift + hiss
             volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
             return volts.astype(np.float64, copy=False)
         else:  # chatter
