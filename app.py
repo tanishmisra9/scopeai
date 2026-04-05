@@ -22,7 +22,6 @@ st.set_page_config(page_title="ScopeAI", layout="wide")
 
 
 def _resolve_artifact_path(filename: str) -> str | None:
-    """Resolve artifact path from models/ first, then project root."""
     root = os.path.dirname(os.path.abspath(__file__))
     for path in (os.path.join(root, "models", filename), os.path.join(root, filename)):
         if os.path.exists(path):
@@ -31,7 +30,6 @@ def _resolve_artifact_path(filename: str) -> str | None:
 
 
 def _load_model_assets() -> tuple[Any, Any, dict[str, Any], str | None]:
-    """Load classifier, label encoder, and metadata with fallback paths."""
     clf = None
     label_encoder = None
     meta: dict[str, Any] = {"features": FEATURES}
@@ -62,7 +60,6 @@ def _load_model_assets() -> tuple[Any, Any, dict[str, Any], str | None]:
 
 
 def _heuristic_predict(circuit_mode: str, feat: dict[str, float]) -> tuple[str, str, float]:
-    """Fallback prediction path when classifier artifacts are unavailable."""
     freq = float(feat.get("freq_hz", 0.0))
     amp = float(feat.get("amplitude_rel", 0.0))
     jitter = float(feat.get("jitter_ms", 0.0))
@@ -82,7 +79,6 @@ def _heuristic_predict(circuit_mode: str, feat: dict[str, float]) -> tuple[str, 
 
 
 def _predict(circuit_mode: str, feat: dict[str, float]) -> tuple[str, str, float]:
-    """Predict mode/fault/confidence from model if available, otherwise heuristic."""
     clf = st.session_state.classifier
     le = st.session_state.label_encoder
     if clf is None or le is None:
@@ -103,7 +99,6 @@ def _predict(circuit_mode: str, feat: dict[str, float]) -> tuple[str, str, float
 
 
 def _init_session_state() -> None:
-    """Initialize required Streamlit session state fields."""
     defaults = {
         "conversation_history": [],
         "last_waveform": None,
@@ -135,8 +130,7 @@ def _init_session_state() -> None:
     st.session_state.simulation_mode = bool(st.session_state.capture_device.get("simulation_mode", False))
 
 
-def _run_sample_cycle(circuit_mode: str, duration_sec: float = 1.0) -> None:
-    """Capture waveform, extract features, classify, and refresh diagnosis text."""
+def _run_sample_cycle(circuit_mode: str, duration_sec: float = 6.0) -> None:
     samples, sr = capture.capture(duration_sec=duration_sec)
     feat = extract_features(samples, sample_rate=sr)
     mode, fault, confidence = _predict(circuit_mode, feat)
@@ -161,7 +155,6 @@ def _run_sample_cycle(circuit_mode: str, duration_sec: float = 1.0) -> None:
 
 
 def _metric_delta(key: str) -> str | None:
-    """Compute display delta string for metric cards."""
     prev = st.session_state.previous_features
     curr = st.session_state.last_features
     if not prev or not curr:
@@ -180,16 +173,13 @@ def _metric_delta(key: str) -> str | None:
     return f"{dv:+.0f}"
 
 
-def _render_waveform() -> None:
-    """Render the waveform chart focused on the last ~50ms."""
+def _render_waveform(duration_sec: float) -> None:
     st.subheader("Live Signal - CH1")
     if not st.session_state.last_waveform:
         st.info("No capture yet.")
         return
     samples, sr = st.session_state.last_waveform
     arr = np.asarray(samples, dtype=np.float64).reshape(-1)
-    win = max(64, int(sr * 0.050))
-    arr = arr[-win:]
     t_ms = np.arange(arr.size) / float(sr) * 1000.0
 
     fig = go.Figure()
@@ -206,7 +196,9 @@ def _render_waveform() -> None:
         height=360,
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
         xaxis_title="Time (ms)",
+        xaxis={"range": [0, duration_sec * 1000.0]},
         yaxis_title="Voltage (V)",
+        yaxis={"range": [0, 5.0]},
         template="plotly_dark",
         showlegend=False,
     )
@@ -214,7 +206,6 @@ def _render_waveform() -> None:
 
 
 def _render_metrics() -> None:
-    """Render the feature metric cards."""
     st.subheader("Signal Metrics")
     feat = st.session_state.last_features
     if not feat:
@@ -234,7 +225,6 @@ def _render_metrics() -> None:
 
 
 def _render_diagnosis() -> None:
-    """Render diagnosis status badge, confidence, and explanation text."""
     st.subheader("ML Diagnosis")
     pred = st.session_state.last_prediction
     if not pred:
@@ -252,8 +242,8 @@ def _render_diagnosis() -> None:
 
 
 def _render_chat_panel() -> None:
-    """Render right-side chat UI and handle chat submissions."""
     st.subheader("AI Chat")
+
     user_input = st.chat_input("Ask ScopeAI about your circuit...")
     if user_input:
         with st.spinner("ScopeAI is thinking..."):
@@ -266,19 +256,19 @@ def _render_chat_panel() -> None:
             st.session_state.conversation_history = updated_history
         st.rerun()
 
-    for msg in st.session_state.conversation_history:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-    if not st.session_state.conversation_history:
-        st.caption(
-            'Try: "What\'s wrong with my circuit?" or "Capture another reading" '
-            'or "Explain jitter" or "Try 3.3V"'
-        )
+    with st.container(height=500):
+        if not st.session_state.conversation_history:
+            st.caption(
+                'Try: "What\'s wrong with my circuit?" or '
+                '"Capture another reading" or "Explain jitter"'
+            )
+        else:
+            for msg in reversed(st.session_state.conversation_history):
+                with st.chat_message(msg["role"]):
+                    st.write(msg["content"])    
 
 
 def main() -> None:
-    """Run Streamlit dashboard app."""
     _init_session_state()
     st.title("ScopeAI")
     if st.session_state.simulation_mode:
@@ -292,8 +282,8 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Controls")
-        circuit_mode = st.selectbox("Circuit Mode", options=["mode_A", "mode_B", "mode_C"], index=0)
-        auto_sample = st.toggle("Auto-Sample", value=True)
+        circuit_mode = st.selectbox("Circuit Mode", options=["555 Astable Oscillator"], format_func=lambda x: "555 Astable Oscillator", index=0)
+        auto_sample = st.toggle("Auto-Sample", value=False)
         interval_sec = st.slider("Sample Interval (sec)", min_value=1, max_value=10, value=3)
         capture_now = st.button("Capture Now")
 
@@ -322,9 +312,16 @@ def main() -> None:
                 except Exception as exc:
                     st.error(str(exc))
 
-    # Trigger manual capture before rendering panels.
-    if capture_now or st.session_state.last_features is None:
-        _run_sample_cycle(circuit_mode=circuit_mode)
+    # Determine whether to capture
+    elapsed = time.time() - st.session_state.last_sample_ts
+    should_capture = (
+        capture_now
+        or st.session_state.last_features is None
+        or (auto_sample and elapsed >= interval_sec)
+    )
+
+    if should_capture:
+        _run_sample_cycle(circuit_mode=circuit_mode, duration_sec=float(interval_sec))
         if capture_now:
             if hasattr(st, "toast"):
                 st.toast("Signal captured")
@@ -334,7 +331,7 @@ def main() -> None:
     left_col, right_col = st.columns([3, 2])
 
     with left_col:
-        _render_waveform()
+        _render_waveform(duration_sec=float(interval_sec))
         _render_metrics()
         _render_diagnosis()
 
@@ -342,7 +339,7 @@ def main() -> None:
         _render_chat_panel()
 
     if auto_sample:
-        time.sleep(interval_sec)
+        time.sleep(0.5)
         st.rerun()
 
 

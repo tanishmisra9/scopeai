@@ -1,9 +1,5 @@
 """
 ScopeAI diagnosis and AI chat module.
-
-Provides:
-- auto_diagnose(): cached one-shot dashboard explanation
-- chat(): multi-turn GPT chat with hardware tool calling
 """
 
 from __future__ import annotations
@@ -21,16 +17,39 @@ from scipy.signal import find_peaks
 import capture
 from features import FEATURES, extract_features, features_to_vector
 
-AUTO_DIAG_SYSTEM_PROMPT = """You are ScopeAI, an expert hardware debugging assistant for introductory electronics students.
-You analyze oscilloscope signals from student circuits and explain faults in clear, beginner-friendly language.
+AUTO_DIAG_SYSTEM_PROMPT = """You are ScopeAI, a hardware debugging assistant for a NE555P astable oscillator circuit.
 
-When given a fault diagnosis and signal metrics:
-1. Explain what the fault means in plain English
-2. Describe what's physically happening in the circuit
-3. Give specific, actionable fix instructions (e.g., "swap the 10kΩ resistor at R2 for a 2.2kΩ")
-4. If nominal, confirm the circuit is working and briefly explain why the metrics look healthy
+The circuit uses a potentiometer as R2. Expected frequency ranges:
+- nominal: ~1-2.5 Hz (pot in middle)
+- R_too_high: ~0.5 Hz (pot at maximum resistance, signal too slow)
+- R_too_low: ~5-8 Hz (pot at minimum resistance, signal too fast)
+- cap_missing: ~0 Hz, near-zero amplitude (timing capacitor removed)
+- no_oscillation: ~0 Hz, near-zero amplitude (output disconnected)
 
-Keep responses concise — 3-5 sentences. The circuit is a NE555P astable oscillator on a breadboard."""
+ALWAYS give specific, actionable fix instructions in 2-3 sentences max.
+- R_too_high: tell them to turn the pot toward minimum or swap a smaller resistor
+- R_too_low: tell them to turn the pot toward maximum or swap a larger resistor
+- cap_missing: tell them to reinsert the timing capacitor between pin 6 and GND
+- no_oscillation: tell them to check the wire from pin 3 to the probe
+- nominal: confirm circuit is healthy and frequency is in expected range"""
+
+
+_CHAT_SYSTEM_PROMPT = """You are ScopeAI, an AI lab partner for a NE555P astable oscillator circuit on a breadboard.
+You have access to live oscilloscope data via an Analog Discovery 2.
+
+The circuit uses a potentiometer as R2. Expected frequency ranges:
+- nominal: ~1-2.5 Hz
+- R_too_high: ~0.5 Hz (pot cranked to max, decrease resistance)
+- R_too_low: ~5-8 Hz (pot at min, increase resistance)
+- cap_missing: ~0 Hz, near-zero amplitude
+- no_oscillation: ~0 Hz, near-zero amplitude
+
+When the student asks about their circuit:
+1. Use the capture_signal tool to get a fresh 6-second reading
+2. Look at the frequency and amplitude
+3. Give a specific 2-sentence diagnosis and fix instruction
+
+Be direct. Say exactly what resistor to change or what to check. Never be vague."""
 
 _CHAT_COOLDOWN_SEC = 2.0
 _last_openai_call_ts = 0.0
@@ -42,12 +61,10 @@ _model_bundle: dict[str, Any] | None = None
 
 
 def _now() -> float:
-    """Return current wall-clock timestamp in seconds."""
     return time.time()
 
 
 def _enforce_cooldown() -> None:
-    """Rate-limit OpenAI calls to avoid bursty chat traffic."""
     global _last_openai_call_ts
     elapsed = _now() - _last_openai_call_ts
     if elapsed < _CHAT_COOLDOWN_SEC:
@@ -56,7 +73,6 @@ def _enforce_cooldown() -> None:
 
 
 def _get_openai_client() -> OpenAI | None:
-    """Create and cache an OpenAI client if credentials are available."""
     global _client
     if _client is not None:
         return _client
@@ -70,20 +86,14 @@ def _get_openai_client() -> OpenAI | None:
 
 
 def _resolve_artifact_path(filename: str) -> str | None:
-    """Resolve model artifact path using models/ first, then project root fallback."""
     root = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(root, "models", filename),
-        os.path.join(root, filename),
-    ]
-    for path in candidates:
+    for path in (os.path.join(root, "models", filename), os.path.join(root, filename)):
         if os.path.exists(path):
             return path
     return None
 
 
 def _load_model_bundle() -> dict[str, Any]:
-    """Load classifier metadata and encoders; gracefully handle missing artifacts."""
     global _model_bundle
     if _model_bundle is not None:
         return _model_bundle
@@ -118,30 +128,18 @@ def _load_model_bundle() -> dict[str, Any]:
 
 
 def _heuristic_fault(metrics: dict[str, float]) -> tuple[str, float]:
-    """Fallback fault classifier when model artifacts are unavailable."""
     freq = float(metrics.get("freq_hz", 0.0))
     amp = float(metrics.get("amplitude_rel", 0.0))
-    jitter = float(metrics.get("jitter_ms", 0.0))
-    spread = float(metrics.get("spectral_spread", 0.0))
-    zc = float(metrics.get("zero_crossing_rate", 0.0))
-
-    if amp < 0.03 and freq < 1.0:
+    if amp < 0.03:
         return "no_oscillation", 0.62
-    if freq < 8.0:
+    if freq < 0.8:
         return "R_too_high", 0.58
-    if freq > 52.0:
+    if freq > 4.0:
         return "R_too_low", 0.60
-    if spread > 1400.0 and zc > 500.0:
-        return "chatter", 0.56
-    if spread > 1200.0 and amp > 0.35:
-        return "clipping", 0.57
-    if jitter > 12.0 and amp < 0.12:
-        return "cap_missing", 0.55
     return "nominal", 0.61
 
 
 def _predict_from_metrics(circuit_mode: str, metrics: dict[str, float]) -> tuple[str, str, float]:
-    """Predict combined label with confidence from model or fallback heuristic."""
     bundle = _load_model_bundle()
     if bundle["available"]:
         try:
@@ -163,7 +161,6 @@ def _predict_from_metrics(circuit_mode: str, metrics: dict[str, float]) -> tuple
 
 
 def auto_diagnose(circuit_mode: str, fault_class: str, confidence: float, metrics: dict[str, Any]) -> str:
-    """Quick one-shot diagnosis for dashboard auto-loop with class-change cache."""
     cache_key = (circuit_mode, fault_class)
     if cache_key in _auto_diag_cache:
         return _auto_diag_cache[cache_key]
@@ -171,30 +168,26 @@ def auto_diagnose(circuit_mode: str, fault_class: str, confidence: float, metric
     client = _get_openai_client()
     if client is None:
         fallback = (
-            f"ML indicates {fault_class} in {circuit_mode} at {confidence:.0%} confidence. "
-            "OpenAI API unavailable, so this is a local fallback explanation. "
-            "Check power rails, 555 orientation, timing resistor/capacitor values, and ground continuity."
+            f"ML indicates {fault_class} at {confidence:.0%} confidence. "
+            "OpenAI API unavailable — check power rails, 555 orientation, timing resistor/capacitor values."
         )
         _auto_diag_cache[cache_key] = fallback
         return fallback
 
     prompt = (
-        f"Circuit: {circuit_mode} (NE555P astable oscillator)\n"
-        f"ML Diagnosis: {fault_class} (confidence: {confidence:.0%})\n"
-        "Signal Metrics:\n"
-        f"  - Frequency: {float(metrics.get('freq_hz', 0.0)):.1f} Hz\n"
-        f"  - Amplitude: {float(metrics.get('amplitude_rel', 0.0)):.4f} (relative)\n"
-        f"  - Jitter: {float(metrics.get('jitter_ms', 0.0)):.2f} ms\n"
-        f"  - Spectral Spread: {float(metrics.get('spectral_spread', 0.0)):.1f}\n"
-        f"  - Zero-Crossing Rate: {float(metrics.get('zero_crossing_rate', 0.0)):.1f}\n\n"
-        "Explain what's wrong and how to fix it."
+        f"NE555P astable oscillator diagnosis:\n"
+        f"ML Fault: {fault_class} ({confidence:.0%} confidence)\n"
+        f"Frequency: {float(metrics.get('freq_hz', 0.0)):.2f} Hz\n"
+        f"Amplitude: {float(metrics.get('amplitude_rel', 0.0)):.4f}\n"
+        f"Jitter: {float(metrics.get('jitter_ms', 0.0)):.2f} ms\n"
+        f"Give a specific 2-sentence diagnosis and fix instruction."
     )
 
     try:
         _enforce_cooldown()
         resp = client.chat.completions.create(
             model="gpt-4o",
-            temperature=0.3,
+            temperature=0.2,
             messages=[
                 {"role": "system", "content": AUTO_DIAG_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -202,180 +195,54 @@ def auto_diagnose(circuit_mode: str, fault_class: str, confidence: float, metric
         )
         text = (resp.choices[0].message.content or "").strip()
         if not text:
-            text = "Diagnosis unavailable at the moment. Please re-capture and retry."
+            text = "Diagnosis unavailable. Please re-capture and retry."
     except Exception:
-        text = (
-            f"ML indicates {fault_class} in {circuit_mode} at {confidence:.0%} confidence. "
-            "Could not reach OpenAI API right now. Verify component values and recapture."
-        )
+        text = f"ML indicates {fault_class} at {confidence:.0%} confidence. Verify component values and recapture."
+
     _auto_diag_cache[cache_key] = text
     return text
 
 
-def _chat_system_prompt(
-    current_metrics: dict[str, Any] | None,
-    current_diagnosis: tuple[str, str, float] | None,
-) -> str:
-    """Build contextual system prompt for interactive chat."""
-    mode, fault, conf = current_diagnosis or ("mode_A", "unknown", 0.0)
-    metrics = current_metrics or {}
-    return (
-        "You are ScopeAI, an AI lab partner for electronics students. "
-        "You can see and interact with the student's circuit through an Analog Discovery 2 oscilloscope.\n\n"
-        "You have tools to:\n"
-        "- Capture new signal readings from the circuit\n"
-        "- Analyze waveform characteristics in detail\n"
-        "- Adjust the power supply voltage\n\n"
-        "Current circuit state:\n"
-        f"- Circuit mode: {mode}\n"
-        f"- Last diagnosis: {fault} ({conf:.0%} confidence)\n"
-        f"- Last metrics: freq={float(metrics.get('freq_hz', 0.0)):.2f}Hz, "
-        f"amplitude={float(metrics.get('amplitude_rel', 0.0)):.4f}, "
-        f"jitter={float(metrics.get('jitter_ms', 0.0)):.2f}ms\n\n"
-        "Be conversational, helpful, and educational. When a student asks a question, "
-        "use your tools proactively if it would help answer their question.\n\n"
-        "Keep responses concise and beginner-friendly. You're a patient TA, not a textbook."
-    )
-
-
 def _tool_schemas() -> list[dict[str, Any]]:
-    """Return OpenAI tool schema definitions for chat tool-calling."""
     return [
         {
             "type": "function",
             "function": {
                 "name": "capture_signal",
-                "description": "Capture a new signal snapshot and run feature extraction + prediction.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "duration_sec": {"type": "number", "default": 0.5, "minimum": 0.1, "maximum": 5.0}
-                    },
-                    "required": [],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "analyze_waveform",
-                "description": "Run deeper analysis on the most recent capture.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "focus": {
-                            "type": "string",
-                            "enum": ["frequency", "jitter", "amplitude", "noise", "harmonics"],
-                        }
-                    },
-                    "required": ["focus"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "set_voltage",
-                "description": "Set AD2 supply voltage (0-5V).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"voltage": {"type": "number", "minimum": 0.0, "maximum": 5.0}},
-                    "required": ["voltage"],
-                },
+                "description": "Capture a fresh 6-second signal reading from the circuit and classify it.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
         {
             "type": "function",
             "function": {
                 "name": "get_device_status",
-                "description": "Get current AD2/simulation status and configuration.",
+                "description": "Get current AD2 connection status and supply voltage.",
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
     ]
 
 
-def _tool_capture_signal(args: dict[str, Any], current_diagnosis: tuple[str, str, float] | None) -> str:
-    """Capture signal and return metrics plus classifier prediction."""
+def _tool_capture_signal(current_diagnosis: tuple[str, str, float] | None) -> str:
     global _last_capture, _last_capture_features
-    duration = float(args.get("duration_sec", 0.5))
-    samples, sr = capture.capture_snapshot(duration_sec=duration)
+    # Always use 6 seconds to match training data
+    samples, sr = capture.capture(duration_sec=5.0)
     metrics = extract_features(samples, sample_rate=sr)
     _last_capture = (samples, sr)
     _last_capture_features = metrics
     circuit_mode = current_diagnosis[0] if current_diagnosis else "mode_A"
     mode, fault, conf = _predict_from_metrics(circuit_mode=circuit_mode, metrics=metrics)
     return (
-        f"Captured {samples.size} samples at {sr} Hz.\n"
-        f"Prediction: {mode}__{fault} ({conf:.0%} confidence)\n"
-        f"Metrics: freq={metrics['freq_hz']:.2f}Hz, amp={metrics['amplitude_rel']:.4f}, "
-        f"jitter={metrics['jitter_ms']:.2f}ms, spread={metrics['spectral_spread']:.1f}, "
-        f"zcr={metrics['zero_crossing_rate']:.0f}"
+        f"Fresh capture complete.\n"
+        f"Prediction: {fault} ({conf:.0%} confidence)\n"
+        f"Frequency: {metrics['freq_hz']:.2f} Hz\n"
+        f"Amplitude: {metrics['amplitude_rel']:.4f}\n"
+        f"Jitter: {metrics['jitter_ms']:.2f} ms"
     )
 
 
-def _tool_analyze_waveform(args: dict[str, Any]) -> str:
-    """Analyze latest captured waveform according to requested focus area."""
-    if _last_capture is None:
-        return "No waveform captured yet. Run capture_signal first."
-    focus = str(args.get("focus", "")).strip().lower()
-    samples, sr = _last_capture
-    x = np.asarray(samples, dtype=np.float64).reshape(-1)
-    centered = x - float(np.mean(x))
-    n = centered.size
-    if n < 8:
-        return "Waveform too short to analyze."
-
-    if focus == "frequency":
-        mags = np.abs(np.fft.rfft(centered))
-        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
-        top = np.argsort(mags[1:])[-3:] + 1 if mags.size > 3 else np.array([0])
-        peaks = ", ".join(f"{freqs[i]:.2f}Hz({mags[i]:.2f})" for i in reversed(top))
-        return f"Dominant frequency components: {peaks}"
-
-    if focus == "harmonics":
-        mags = np.abs(np.fft.rfft(centered))
-        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
-        idx = np.argsort(mags[1:])[-5:] + 1 if mags.size > 6 else np.arange(1, mags.size)
-        lines = [f"{freqs[i]:.2f} Hz (mag={mags[i]:.2f})" for i in reversed(idx)]
-        return "Top harmonic peaks:\n" + "\n".join(f"- {line}" for line in lines)
-
-    if focus == "jitter":
-        peaks, _ = find_peaks(centered, prominence=max(1e-6, np.std(centered) * 0.2))
-        if peaks.size < 3:
-            return "Not enough peaks to estimate jitter reliably."
-        intervals_ms = np.diff(peaks) * 1000.0 / float(sr)
-        return (
-            f"Jitter stats: mean period={np.mean(intervals_ms):.2f}ms, "
-            f"std={np.std(intervals_ms):.2f}ms, min={np.min(intervals_ms):.2f}ms, "
-            f"max={np.max(intervals_ms):.2f}ms."
-        )
-
-    if focus == "amplitude":
-        p2p = float(np.ptp(x))
-        rms = float(np.sqrt(np.mean(centered**2)))
-        return f"Amplitude analysis: p2p={p2p:.3f}V, half-p2p={p2p/2:.3f}V, rms={rms:.3f}V."
-
-    if focus == "noise":
-        mags = np.abs(np.fft.rfft(centered))
-        if mags.size < 4:
-            return "Insufficient FFT bins to estimate noise."
-        peak = float(np.max(mags[1:]))
-        floor = float(np.median(mags[1:]) + 1e-9)
-        snr_db = 20.0 * np.log10(max(peak, 1e-9) / floor)
-        return f"Estimated spectral noise floor={floor:.4f}, peak={peak:.4f}, approx SNR={snr_db:.2f} dB."
-
-    return "Unknown focus. Use one of: frequency, jitter, amplitude, noise, harmonics."
-
-
-def _tool_set_voltage(args: dict[str, Any]) -> str:
-    """Set AD2 supply voltage with safety clamp to 0-5V."""
-    voltage = float(args.get("voltage", 0.0))
-    return capture.set_supply_voltage(voltage)
-
-
 def _tool_get_device_status() -> str:
-    """Get AD2/simulation status as a compact JSON string."""
     info = capture.get_device_info()
     return json.dumps(info, indent=2)
 
@@ -385,14 +252,9 @@ def _execute_tool(
     tool_args: dict[str, Any],
     current_diagnosis: tuple[str, str, float] | None,
 ) -> str:
-    """Dispatch tool calls and return textual tool results."""
     try:
         if tool_name == "capture_signal":
-            return _tool_capture_signal(tool_args, current_diagnosis=current_diagnosis)
-        if tool_name == "analyze_waveform":
-            return _tool_analyze_waveform(tool_args)
-        if tool_name == "set_voltage":
-            return _tool_set_voltage(tool_args)
+            return _tool_capture_signal(current_diagnosis=current_diagnosis)
         if tool_name == "get_device_status":
             return _tool_get_device_status()
         return f"Unknown tool: {tool_name}"
@@ -406,24 +268,26 @@ def chat(
     current_metrics: dict[str, Any] | None = None,
     current_diagnosis: tuple[str, str, float] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Multi-turn chat with tool access.
-
-    Returns:
-        (response_text, updated_history)
-    """
     client = _get_openai_client()
     if client is None:
-        text = (
-            "OpenAI API unavailable right now. I can still show live metrics and ML predictions; "
-            "set OPENAI_API_KEY to enable interactive AI chat."
-        )
-        updated = conversation_history + [{"role": "user", "content": user_message}, {"role": "assistant", "content": text}]
+        text = "OpenAI API unavailable. Set OPENAI_API_KEY to enable AI chat."
+        updated = conversation_history + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": text},
+        ]
         return text, updated
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _chat_system_prompt(current_metrics, current_diagnosis)}
-    ]
+    mode, fault, conf = current_diagnosis or ("mode_A", "unknown", 0.0)
+    metrics = current_metrics or {}
+
+    system = (
+        f"{_CHAT_SYSTEM_PROMPT}\n\n"
+        f"Current state: fault={fault} ({conf:.0%}), "
+        f"freq={float(metrics.get('freq_hz', 0.0)):.2f}Hz, "
+        f"amplitude={float(metrics.get('amplitude_rel', 0.0)):.4f}"
+    )
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
 
@@ -435,7 +299,7 @@ def chat(
             _enforce_cooldown()
             resp = client.chat.completions.create(
                 model="gpt-4o",
-                temperature=0.3,
+                temperature=0.2,
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
@@ -443,23 +307,21 @@ def chat(
             msg = resp.choices[0].message
 
             if msg.tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": tc.type,
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
-                    }
-                )
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
                 for tc in msg.tool_calls:
                     args = {}
                     if tc.function.arguments:
@@ -468,24 +330,20 @@ def chat(
                         except json.JSONDecodeError:
                             args = {}
                     tool_result = _execute_tool(tc.function.name, args, current_diagnosis)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tc.function.name,
-                            "content": tool_result,
-                        }
-                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.function.name,
+                        "content": tool_result,
+                    })
                 continue
 
             final_text = (msg.content or "").strip()
             if not final_text:
-                final_text = "I completed the request but got an empty response. Please try again."
+                final_text = "Empty response. Please try again."
             break
-    except Exception:
-        final_text = (
-            "I couldn't reach the AI service right now. You can still use ScopeAI live capture and metrics."
-        )
+    except Exception as exc:
+        final_text = f"Could not reach AI service: {exc}"
 
     updated_history = conversation_history + [
         {"role": "user", "content": user_message},
