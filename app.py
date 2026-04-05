@@ -324,7 +324,7 @@ def main() -> None:
     if capture_now or st.session_state.last_features is None:
         _run_sample_cycle(circuit_mode=circuit_mode)
 
-    left_col, right_col = st.columns([3, 2], vertical_alignment="top")
+    left_col, right_col = st.columns([3, 2])
 
     with left_col:
         _render_waveform()

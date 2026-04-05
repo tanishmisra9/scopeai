@@ -1,0 +1,36 @@
+ScopeAI Fault Classifier — Training Report
+==================================================
+Date: 2026-04-05T00:53:37.026746
+Model: RandomForest
+CV Accuracy: 1.0000
+Test Accuracy: 1.0000
+Total Samples: 520
+
+Classification Report:
+                        precision    recall  f1-score   support
+
+    mode_A__R_too_high       1.00      1.00      1.00         8
+     mode_A__R_too_low       1.00      1.00      1.00         8
+   mode_A__cap_missing       1.00      1.00      1.00         8
+mode_A__no_oscillation       1.00      1.00      1.00         8
+       mode_A__nominal       1.00      1.00      1.00         8
+    mode_B__R_too_high       1.00      1.00      1.00         8
+     mode_B__R_too_low       1.00      1.00      1.00         8
+   mode_B__cap_missing       1.00      1.00      1.00         8
+       mode_B__nominal       1.00      1.00      1.00         8
+       mode_C__chatter       1.00      1.00      1.00         8
+      mode_C__clipping       1.00      1.00      1.00         8
+mode_C__no_oscillation       1.00      1.00      1.00         8
+       mode_C__nominal       1.00      1.00      1.00         8
+
+              accuracy                           1.00       104
+             macro avg       1.00      1.00      1.00       104
+          weighted avg       1.00      1.00      1.00       104
+
+
+Feature Importances:
+  spectral_spread: 0.3128
+  freq_hz: 0.2097
+  zero_crossing_rate: 0.1845
+  amplitude_rel: 0.1491
+  jitter_ms: 0.1440

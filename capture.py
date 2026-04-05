@@ -204,6 +204,13 @@ class _ScopeCaptureBackend:
             arr = np.pad(arr, (0, n_samples - arr.size), mode="constant", constant_values=pad_val)
         return arr
 
+    def _smooth_noise(self, n_samples: int, kernel_size: int) -> np.ndarray:
+        """Return low-pass-like noise by convolving white noise with a box kernel."""
+        kernel = np.ones(max(3, kernel_size), dtype=np.float64)
+        kernel /= float(kernel.size)
+        white = np.random.normal(0.0, 1.0, size=n_samples)
+        return np.convolve(white, kernel, mode="same")
+
     def _simulate_waveform(self, duration_sec: float) -> np.ndarray:
         """Generate synthetic waveform data for simulation mode."""
         n_samples = max(1, int(round(max(0.05, duration_sec) * self.sample_rate)))
@@ -229,13 +236,31 @@ class _ScopeCaptureBackend:
             wave = np.where(np.mod(t * freq, 1.0) < duty, 1.0, -1.0)
             noise_std = 0.025
         elif self.simulated_fault == "cap_missing":
-            wave = np.random.normal(0.0, 1.0, size=n_samples)
-            amplitude = 0.15 * self.supply_voltage
-            noise_std = 0.08
+            # Cap missing: weak near-DC behavior plus mains pickup and tiny fast chatter.
+            # This keeps amplitude tiny while preventing broadband white-noise outliers.
+            base_dc = 0.08 * self.supply_voltage
+            hum_60hz = 0.0011 * np.sin(2.0 * np.pi * 60.0 * t)
+            tiny_chatter = 0.00017 * np.sign(np.sin(2.0 * np.pi * 650.0 * t))
+            drift = 0.0006 * self._smooth_noise(n_samples=n_samples, kernel_size=110)
+            hiss = 0.00014 * np.random.normal(0.0, 1.0, size=n_samples)
+            volts = base_dc + hum_60hz + tiny_chatter + drift + hiss
+            volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
+            return volts.astype(np.float64, copy=False)
         elif self.simulated_fault == "no_oscillation":
-            wave = np.zeros_like(t)
-            amplitude = 0.03 * self.supply_voltage
-            noise_std = 0.01
+            # No oscillation: pinned output with ripple/noise; keep dominant energy near 60 Hz.
+            # Add mild FM so timing metrics do not collapse to perfect periodicity.
+            base_dc = 0.90
+            inst_freq = 60.0 + 10.0 * np.sin(2.0 * np.pi * 2.0 * t) + 3.0 * np.sin(
+                2.0 * np.pi * 4.1 * t
+            )
+            phase_60 = 2.0 * np.pi * np.cumsum(inst_freq) / float(self.sample_rate)
+            hum_60hz = 0.82 * np.sin(phase_60)
+            harmonic_180 = 0.12 * np.sin(2.0 * np.pi * 180.0 * t + 0.4)
+            flicker = 0.025 * self._smooth_noise(n_samples=n_samples, kernel_size=128)
+            hiss = 0.020 * np.random.normal(0.0, 1.0, size=n_samples)
+            volts = base_dc + hum_60hz + harmonic_180 + flicker + hiss
+            volts = np.clip(volts, 0.0, max(0.1, self.supply_voltage))
+            return volts.astype(np.float64, copy=False)
         else:  # chatter
             base = np.where(np.mod(t * 18.0, 1.0) < 0.5, 1.0, -1.0)
             chatter = 0.6 * np.sin(2.0 * np.pi * 220.0 * t)

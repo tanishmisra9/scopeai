@@ -1,0 +1,43 @@
+{
+  "features": [
+    "freq_hz",
+    "amplitude_rel",
+    "jitter_ms",
+    "spectral_spread",
+    "zero_crossing_rate"
+  ],
+  "combined_classes": [
+    "mode_A__R_too_high",
+    "mode_A__R_too_low",
+    "mode_A__cap_missing",
+    "mode_A__no_oscillation",
+    "mode_A__nominal",
+    "mode_B__R_too_high",
+    "mode_B__R_too_low",
+    "mode_B__cap_missing",
+    "mode_B__nominal",
+    "mode_C__chatter",
+    "mode_C__clipping",
+    "mode_C__no_oscillation",
+    "mode_C__nominal"
+  ],
+  "fault_classes": [
+    "R_too_high",
+    "R_too_low",
+    "cap_missing",
+    "chatter",
+    "clipping",
+    "no_oscillation",
+    "nominal"
+  ],
+  "mode_classes": [
+    "mode_A",
+    "mode_B",
+    "mode_C"
+  ],
+  "best_model": "RandomForest",
+  "cv_accuracy": 1.0,
+  "test_accuracy": 1.0,
+  "n_samples": 520,
+  "trained_at": "2026-04-05T00:53:37.026393"
+}
